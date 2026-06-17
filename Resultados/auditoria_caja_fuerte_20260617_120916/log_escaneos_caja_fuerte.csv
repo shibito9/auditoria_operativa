@@ -1,0 +1,4 @@
+﻿timestamp,raw,normalizado,resultado,detalle
+2026-06-17 12:09:27,38430,434-99-038430,ENCONTRADO,Contrato encontrado en el alcance de auditoría.
+2026-06-17 12:09:33,38430,434-99-038430,OK,OK | OK | Cantidad 4/4 | Peso total esperado 6.6 | Peso con bolsa esperado 8.2 | Peso bruto evidenciado None | Neto calculado None | Diff None
+2026-06-17 12:09:33,38430,434-99-038430,YA_AUDITADO,Contrato ya auditado como OK. Puedes revisar o sobrescribir si fue un error.
