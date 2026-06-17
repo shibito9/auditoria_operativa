@@ -112,13 +112,58 @@ class FacturasView(ctk.CTkToplevel):
         # Botón de carga
         load_button = ctk.CTkButton(
             file_frame,
-            text="Cargar y Validar",
-            width=140,
+            text="Cargar Excel",
+            width=120,
             fg_color="#107C10",
             hover_color="#0B5A0A",
             command=self._load_and_validate_excel
         )
         load_button.pack(side="left", padx=10, pady=10)
+        
+        # Campo % máximo permitido
+        self.porcentaje_max_var = ctk.StringVar(value="8")
+        porcentaje_label = ctk.CTkLabel(
+            file_frame,
+            text="% máx permitido:",
+            font=ctk.CTkFont(size=12)
+        )
+        porcentaje_label.pack(side="left", padx=(20, 5), pady=10)
+        
+        porcentaje_entry = ctk.CTkEntry(
+            file_frame,
+            textvariable=self.porcentaje_max_var,
+            width=80,
+            font=ctk.CTkFont(size=12)
+        )
+        porcentaje_entry.pack(side="left", padx=5, pady=10)
+        
+        # Campo tolerancia
+        self.tolerancia_var = ctk.StringVar(value="0.10")
+        tolerancia_label = ctk.CTkLabel(
+            file_frame,
+            text="Tolerancia:",
+            font=ctk.CTkFont(size=12)
+        )
+        tolerancia_label.pack(side="left", padx=(20, 5), pady=10)
+        
+        tolerancia_entry = ctk.CTkEntry(
+            file_frame,
+            textvariable=self.tolerancia_var,
+            width=80,
+            font=ctk.CTkFont(size=12)
+        )
+        tolerancia_entry.pack(side="left", padx=5, pady=10)
+        
+        # Botón Validar Auditoría
+        validate_button = ctk.CTkButton(
+            file_frame,
+            text="Validar Auditoría",
+            width=140,
+            fg_color="#1F4E78",
+            hover_color="#163A5C",
+            command=self._validate_auditoria
+        )
+        validate_button.pack(side="left", padx=10, pady=10)
     
     def _create_summary_panel(self):
         """Crea el panel resumen con estadísticas"""
@@ -284,22 +329,61 @@ class FacturasView(ctk.CTkToplevel):
             # Validar columnas requeridas
             self._validate_required_columns()
             
-            # Procesar facturas (agrupación por Secuencia Factura)
-            self._process_facturas()
-            
-            # Actualizar interfaz
-            self._update_summary()
-            self._populate_results_table()
+            # Inicializar variables de resultados
+            self.facturas_resultados = []
             
             messagebox.showinfo(
                 "Éxito",
-                f"Archivo cargado correctamente.\nTotal de filas: {len(self.df_facturas)}"
+                f"Archivo cargado correctamente.\nTotal de filas: {len(self.df_facturas)}\n\n"
+                "Ahora puedes configurar los parámetros y hacer clic en 'Validar Auditoría'."
             )
             
         except Exception as e:
             messagebox.showerror(
                 "Error al cargar Excel",
                 f"No se pudo cargar el archivo: {str(e)}"
+            )
+    
+    def _validate_auditoria(self):
+        """Ejecuta la validación de auditoría con los parámetros configurados"""
+        if self.df_facturas is None:
+            messagebox.showerror(
+                "Error",
+                "Primero debes cargar un archivo Excel."
+            )
+            return
+        
+        try:
+            # Obtener parámetros
+            porcentaje_permitido = float(self.porcentaje_max_var.get())
+            tolerancia = float(self.tolerancia_var.get())
+            
+            # Procesar facturas con validación
+            self.facturas_resultados = self._group_and_classify_facturas(
+                self.df_facturas,
+                porcentaje_permitido,
+                tolerancia
+            )
+            
+            # Actualizar interfaz
+            self._update_summary()
+            self._populate_results_table()
+            
+            messagebox.showinfo(
+                "Validación Completada",
+                f"Se validaron {len(self.facturas_resultados)} facturas.\n"
+                f"Revisa el resumen y la tabla de resultados."
+            )
+            
+        except ValueError as e:
+            messagebox.showerror(
+                "Error de parámetros",
+                f"Por favor verifica los valores de % máximo y tolerancia: {e}"
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Error al validar",
+                f"No se pudo completar la validación: {str(e)}"
             )
     
     def _validate_required_columns(self):
@@ -346,26 +430,109 @@ class FacturasView(ctk.CTkToplevel):
         # Definir columna identificadora principal de factura
         self.factura_id_column = self.column_mapping["Secuencia Factura"]
     
-    def _process_facturas(self):
-        """Procesa las facturas agrupando por Secuencia Factura"""
-        # Esta función se implementará con el servicio de parser
-        # Por ahora, solo contamos las filas
-        self.facturas_procesadas = {
-            "total_filas": len(self.df_facturas),
-            "total_facturas": 0,  # Se calculará después de agrupar
-            "correctas": 0,
-            "errores": 0,
-            "revision_manual": 0,
-            "excluidas": 0,
-        }
+    def _calculate_line_discount(self, row, porcentaje_permitido, tolerancia):
+        """Calcula y clasifica una línea individual"""
+        # Extraer valores del mapeo de columnas
+        subtotal = row[self.column_mapping["Subtotal"]]
+        descuento = row[self.column_mapping["Descuento"]]
         
-        # Placeholder: actualizar métricas temporales
-        self.total_facturas_var.set(str(len(self.df_facturas)))
+        # Validar datos suficientes
+        if pd.isna(subtotal) or pd.isna(descuento) or subtotal <= 0:
+            return "DATOS_INSUFICIENTES", 0, "Subtotal vacío, Descuento vacío o Subtotal <= 0"
+        
+        # Calcular porcentaje real
+        porcentaje_real = (descuento / subtotal) * 100
+        
+        # Clasificar según reglas V1
+        limite_superior = porcentaje_permitido + tolerancia
+        
+        if descuento == 0:
+            return "SIN_DESCUENTO", porcentaje_real, "Descuento es 0"
+        elif porcentaje_real <= limite_superior:
+            return "CORRECTA", porcentaje_real, f"{porcentaje_real:.2f}% <= {limite_superior:.2f}%"
+        else:
+            return "NOVEDAD", porcentaje_real, f"{porcentaje_real:.2f}% > {limite_superior:.2f}%"
+    
+    def _group_and_classify_facturas(self, df, porcentaje_permitido, tolerancia):
+        """Agrupa por Secuencia Factura y clasifica cada factura"""
+        # Calcular clasificación por línea
+        lineas_clasificadas = []
+        for idx, row in df.iterrows():
+            estado, porcentaje, obs = self._calculate_line_discount(row, porcentaje_permitido, tolerancia)
+            lineas_clasificadas.append({
+                "secuencia": row[self.factura_id_column],
+                "estado": estado,
+                "porcentaje": porcentaje,
+                "observacion": obs,
+                "subtotal": row[self.column_mapping["Subtotal"]],
+                "descuento": row[self.column_mapping["Descuento"]]
+            })
+        
+        # Agrupar por Secuencia Factura
+        facturas_agrupadas = {}
+        for linea in lineas_clasificadas:
+            secuencia = linea["secuencia"]
+            if secuencia not in facturas_agrupadas:
+                facturas_agrupadas[secuencia] = {
+                    "secuencia": secuencia,
+                    "cantidad_lineas": 0,
+                    "subtotal_total": 0,
+                    "descuento_total": 0,
+                    "estados_lineas": [],
+                    "observaciones": []
+                }
+            
+            facturas_agrupadas[secuencia]["cantidad_lineas"] += 1
+            facturas_agrupadas[secuencia]["subtotal_total"] += linea["subtotal"]
+            facturas_agrupadas[secuencia]["descuento_total"] += linea["descuento"]
+            facturas_agrupadas[secuencia]["estados_lineas"].append(linea["estado"])
+            facturas_agrupadas[secuencia]["observaciones"].append(linea["observacion"])
+        
+        # Determinar estado final por factura
+        resultados = []
+        for secuencia, datos in facturas_agrupadas.items():
+            estados = set(datos["estados_lineas"])
+            
+            if "DATOS_INSUFICIENTES" in estados:
+                estado_final = "REVISION_MANUAL"
+            elif "NOVEDAD" in estados:
+                estado_final = "ERROR"
+            else:
+                estado_final = "CORRECTA"
+            
+            # Calcular % global
+            porcentaje_global = (datos["descuento_total"] / datos["subtotal_total"]) * 100 if datos["subtotal_total"] > 0 else 0
+            
+            resultados.append({
+                "secuencia": secuencia,
+                "cantidad_lineas": datos["cantidad_lineas"],
+                "subtotal_total": datos["subtotal_total"],
+                "descuento_total": datos["descuento_total"],
+                "porcentaje_global": porcentaje_global,
+                "estado": estado_final,
+                "observacion": "; ".join(datos["observaciones"][:3])  # Primeras 3 observaciones
+            })
+        
+        return resultados
     
     def _update_summary(self):
         """Actualiza el panel resumen con las estadísticas"""
-        # Esta función se actualizará cuando se implemente el servicio de auditor
-        pass
+        if not hasattr(self, 'facturas_resultados') or not self.facturas_resultados:
+            return
+        
+        # Calcular estadísticas
+        total_facturas = len(self.facturas_resultados)
+        correctas = sum(1 for f in self.facturas_resultados if f["estado"] == "CORRECTA")
+        errores = sum(1 for f in self.facturas_resultados if f["estado"] == "ERROR")
+        revision_manual = sum(1 for f in self.facturas_resultados if f["estado"] == "REVISION_MANUAL")
+        excluidas = 0  # Por ahora
+        
+        # Actualizar tarjetas
+        self.total_facturas_var.set(str(total_facturas))
+        self.correctas_var.set(str(correctas))
+        self.errores_var.set(str(errores))
+        self.revision_manual_var.set(str(revision_manual))
+        self.excluidas_var.set(str(excluidas))
     
     def _populate_results_table(self):
         """Pobla la tabla de resultados con las facturas procesadas"""
@@ -373,14 +540,105 @@ class FacturasView(ctk.CTkToplevel):
         if hasattr(self, 'empty_message'):
             self.empty_message.destroy()
         
-        # Esta función se implementará cuando se procesen las facturas
-        placeholder_label = ctk.CTkLabel(
-            self.table_scroll,
-            text="La tabla se poblará con los resultados de auditoría",
-            font=ctk.CTkFont(size=12),
-            text_color="gray"
-        )
-        placeholder_label.pack(pady=50)
+        # Limpiar contenido anterior
+        for widget in self.table_scroll.winfo_children():
+            widget.destroy()
+        
+        if not hasattr(self, 'facturas_resultados') or not self.facturas_resultados:
+            placeholder_label = ctk.CTkLabel(
+                self.table_scroll,
+                text="Valida la auditoría para ver los resultados",
+                font=ctk.CTkFont(size=12),
+                text_color="gray"
+            )
+            placeholder_label.pack(pady=50)
+            return
+        
+        # Crear encabezado de tabla
+        header_frame = ctk.CTkFrame(self.table_scroll)
+        header_frame.pack(fill="x", padx=5, pady=5)
+        
+        headers = ["Secuencia", "Líneas", "Subtotal", "Descuento", "% Global", "Estado", "Observación"]
+        for i, header in enumerate(headers):
+            label = ctk.CTkLabel(
+                header_frame,
+                text=header,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                width=120,
+                anchor="w"
+            )
+            label.grid(row=0, column=i, padx=5, pady=5)
+        
+        # Poblar filas con resultados
+        for i, factura in enumerate(self.facturas_resultados, start=1):
+            row_frame = ctk.CTkFrame(self.table_scroll)
+            row_frame.pack(fill="x", padx=5, pady=2)
+            
+            # Color según estado
+            bg_color = {
+                "CORRECTA": "#C6EFCE",
+                "ERROR": "#FFC7CE",
+                "REVISION_MANUAL": "#FFF2CC"
+            }.get(factura["estado"], "#FFFFFF")
+            
+            # Secuencia
+            ctk.CTkLabel(
+                row_frame,
+                text=str(factura["secuencia"]),
+                width=120,
+                anchor="w"
+            ).grid(row=0, column=0, padx=5, pady=5)
+            
+            # Cantidad líneas
+            ctk.CTkLabel(
+                row_frame,
+                text=str(factura["cantidad_lineas"]),
+                width=120,
+                anchor="w"
+            ).grid(row=0, column=1, padx=5, pady=5)
+            
+            # Subtotal total
+            ctk.CTkLabel(
+                row_frame,
+                text=f"${factura['subtotal_total']:,.2f}",
+                width=120,
+                anchor="w"
+            ).grid(row=0, column=2, padx=5, pady=5)
+            
+            # Descuento total
+            ctk.CTkLabel(
+                row_frame,
+                text=f"${factura['descuento_total']:,.2f}",
+                width=120,
+                anchor="w"
+            ).grid(row=0, column=3, padx=5, pady=5)
+            
+            # % global
+            ctk.CTkLabel(
+                row_frame,
+                text=f"{factura['porcentaje_global']:.2f}%",
+                width=120,
+                anchor="w"
+            ).grid(row=0, column=4, padx=5, pady=5)
+            
+            # Estado
+            estado_label = ctk.CTkLabel(
+                row_frame,
+                text=factura["estado"],
+                width=120,
+                anchor="w",
+                fg_color=bg_color,
+                corner_radius=4
+            )
+            estado_label.grid(row=0, column=5, padx=5, pady=5)
+            
+            # Observación
+            ctk.CTkLabel(
+                row_frame,
+                text=factura["observacion"][:50] + "..." if len(factura["observacion"]) > 50 else factura["observacion"],
+                width=300,
+                anchor="w"
+            ).grid(row=0, column=6, padx=5, pady=5)
     
     def _export_results(self):
         """Exporta los resultados a un archivo Excel"""
