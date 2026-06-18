@@ -36,6 +36,12 @@ class Factura:
     tipo_error: str = ""
     observacion: str = ""
     
+    # Validación comercial con circulares
+    circular_aplicada: Optional[str] = None  # Código de circular aplicada
+    regla_aplicada: Optional[str] = None  # ID de regla aplicada
+    estado_comercial: str = "SIN_REGLA"  # CORRECTA, ERROR_DESCUENTO, ERROR_VALOR_VENTA, FUERA_DE_VIGENCIA, EXCLUIDA_POR_CIRCULAR, REQUIERE_OTRA_CIRCULAR, REVISION_MANUAL, SIN_REGLA
+    error_comercial: str = ""
+    
     # Productos asociados a la factura
     productos: List[Any] = field(default_factory=list)
     
@@ -63,6 +69,10 @@ class Factura:
             "num_productos": len(self.productos),
             "joyeria": self.joyeria,
             "ciudad": self.ciudad,
+            "circular_aplicada": self.circular_aplicada,
+            "regla_aplicada": self.regla_aplicada,
+            "estado_comercial": self.estado_comercial,
+            "error_comercial": self.error_comercial,
         }
     
     def __str__(self) -> str:

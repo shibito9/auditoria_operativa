@@ -13,6 +13,12 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from typing import Optional, Dict, Any
 import pandas as pd
+from datetime import date
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+
+from services import CircularService, ValidacionComercialService
 
 
 class FacturasView(ctk.CTkToplevel):
@@ -25,13 +31,17 @@ class FacturasView(ctk.CTkToplevel):
         self.minsize(1000, 700)
         
         # Configuración de tema
-        ctk.set_appearance_mode("System")
+        ctk.set_appearance_mode("Light")
         ctk.set_default_color_theme("blue")
         
         # Variables de estado
         self.excel_path: Optional[Path] = None
         self.df_facturas: Optional[pd.DataFrame] = None
         self.facturas_procesadas: Dict[str, Any] = {}
+        
+        # Servicios de validación comercial
+        self.circular_service = CircularService()
+        self.validacion_comercial = ValidacionComercialService(self.circular_service)
         
         # Configuración de la ventana
         self._setup_ui()
@@ -222,6 +232,22 @@ class FacturasView(ctk.CTkToplevel):
             "excluidas",
             "#555555"
         )
+        
+        self._create_metric_card(
+            metrics_frame, 
+            "Sin Regla", 
+            "0", 
+            "sin_regla",
+            "#999999"
+        )
+        
+        self._create_metric_card(
+            metrics_frame, 
+            "Fuera Vigencia", 
+            "0", 
+            "fuera_vigencia",
+            "#FF9900"
+        )
     
     def _create_metric_card(self, parent: ctk.CTkFrame, title: str, value: str, 
                            var_name: str, color: str):
@@ -403,6 +429,17 @@ class FacturasView(ctk.CTkToplevel):
             "Linea Nombre": ["Linea Nombre", "Línea", "Linea"],
         }
         
+        # Columna opcional para origen_comercial (se usará como fuente principal del cruce comercial)
+        optional_columns_with_aliases = {
+            "origen_comercial": [
+                "Linea Nombre",  # Prioridad 1
+                "Linea Origen",  # Prioridad 2
+                "Procedencia",   # Prioridad 3
+                "Procedencia Joya",  # Prioridad 4
+                "Origen"         # Prioridad 5
+            ]
+        }
+        
         # Mapeo de columnas encontradas en el Excel
         self.column_mapping = {}
         missing_columns = []
@@ -426,6 +463,19 @@ class FacturasView(ctk.CTkToplevel):
             raise ValueError(
                 f"Faltan columnas requeridas en el Excel:\n{chr(10).join(missing_columns)}"
             )
+        
+        # Mapear origen_comercial (opcional, pero crítica para cruce comercial)
+        self.origen_comercial_mapping = None
+        for main_col, aliases in optional_columns_with_aliases.items():
+            for df_col in self.df_facturas.columns:
+                for alias in aliases:
+                    if alias.lower() in str(df_col).lower():
+                        self.origen_comercial_mapping = df_col
+                        break
+                if self.origen_comercial_mapping:
+                    break
+            if self.origen_comercial_mapping:
+                break
         
         # Definir columna identificadora principal de factura
         self.factura_id_column = self.column_mapping["Secuencia Factura"]
@@ -454,18 +504,33 @@ class FacturasView(ctk.CTkToplevel):
             return "NOVEDAD", porcentaje_real, f"{porcentaje_real:.2f}% > {limite_superior:.2f}%"
     
     def _group_and_classify_facturas(self, df, porcentaje_permitido, tolerancia):
-        """Agrupa por Secuencia Factura y clasifica cada factura"""
-        # Calcular clasificación por línea
+        """Agrupa por Secuencia Factura y clasifica cada factura con validación comercial"""
+        # Calcular clasificación por línea (validación de descuento tradicional)
         lineas_clasificadas = []
         for idx, row in df.iterrows():
             estado, porcentaje, obs = self._calculate_line_discount(row, porcentaje_permitido, tolerancia)
+            
+            # Construir origen_comercial desde los aliases en orden de prioridad
+            origen_comercial = ""
+            if self.origen_comercial_mapping:
+                valor_raw = row[self.origen_comercial_mapping]
+                if pd.notna(valor_raw):
+                    origen_comercial = str(valor_raw).strip().upper()
+            
             lineas_clasificadas.append({
                 "secuencia": row[self.factura_id_column],
                 "estado": estado,
                 "porcentaje": porcentaje,
                 "observacion": obs,
                 "subtotal": row[self.column_mapping["Subtotal"]],
-                "descuento": row[self.column_mapping["Descuento"]]
+                "descuento": row[self.column_mapping["Descuento"]],
+                "fecha_factura": row[self.column_mapping["Fecha Factura"]],
+                "categoria": row[self.column_mapping["Producto Categoria"]],
+                "descripcion": row[self.column_mapping["Producto Descripcion"]],
+                "linea": row[self.column_mapping["Linea Nombre"]],
+                "gramos": row[self.column_mapping["Producto Gramos"]],
+                "valor_total": row[self.column_mapping["Valor Total"]],
+                "origen_comercial": origen_comercial
             })
         
         # Agrupar por Secuencia Factura
@@ -479,7 +544,8 @@ class FacturasView(ctk.CTkToplevel):
                     "subtotal_total": 0,
                     "descuento_total": 0,
                     "estados_lineas": [],
-                    "observaciones": []
+                    "observaciones": [],
+                    "lineas_completas": []
                 }
             
             facturas_agrupadas[secuencia]["cantidad_lineas"] += 1
@@ -487,18 +553,90 @@ class FacturasView(ctk.CTkToplevel):
             facturas_agrupadas[secuencia]["descuento_total"] += linea["descuento"]
             facturas_agrupadas[secuencia]["estados_lineas"].append(linea["estado"])
             facturas_agrupadas[secuencia]["observaciones"].append(linea["observacion"])
+            facturas_agrupadas[secuencia]["lineas_completas"].append(linea)
         
-        # Determinar estado final por factura
+        # Determinar estado final por factura (combinando validación tradicional + comercial)
         resultados = []
         for secuencia, datos in facturas_agrupadas.items():
-            estados = set(datos["estados_lineas"])
+            # Primero, validación tradicional de descuento
+            estados_tradicionales = set(datos["estados_lineas"])
             
-            if "DATOS_INSUFICIENTES" in estados:
-                estado_final = "REVISION_MANUAL"
-            elif "NOVEDAD" in estados:
-                estado_final = "ERROR"
+            if "DATOS_INSUFICIENTES" in estados_tradicionales:
+                estado_tradicional = "REVISION_MANUAL"
+            elif "NOVEDAD" in estados_tradicionales:
+                estado_tradicional = "ERROR"
             else:
+                estado_tradicional = "CORRECTA"
+            
+            # Segundo, validación comercial con circulares
+            fecha_factura = datos["lineas_completas"][0]["fecha_factura"]
+            
+            # Convertir fecha si es necesario
+            if isinstance(fecha_factura, str):
+                try:
+                    fecha_factura = pd.to_datetime(fecha_factura).date()
+                except:
+                    fecha_factura = date.today()
+            
+            # Preparar líneas para validación comercial
+            lineas_para_validacion = []
+            for linea in datos["lineas_completas"]:
+                lineas_para_validacion.append({
+                    "Producto Categoria": linea["categoria"],
+                    "Producto Descripcion": linea["descripcion"],
+                    "Linea Nombre": linea["linea"],
+                    "Producto Gramos": linea["gramos"],
+                    "Subtotal": linea["subtotal"],
+                    "Descuento": linea["descuento"],
+                    "Valor Total": linea["valor_total"],
+                    "origen_comercial": linea.get("origen_comercial", "")
+                })
+            
+            # Ejecutar validación comercial
+            resultado_comercial = self.validacion_comercial.validar_factura(
+                lineas_para_validacion,
+                fecha_factura,
+                tolerancia
+            )
+            
+            # Separar estados explícitamente
+            estado_descuento = estado_tradicional
+            estado_comercial = resultado_comercial["estado"]
+            
+            # Matriz de combinación de estados
+            if estado_descuento == "DATOS_INSUFICIENTES":
+                estado_final = "REVISION_MANUAL"
+            elif estado_descuento == "ERROR" and estado_comercial in ["CORRECTA", "SIN_REGLA", "FUERA_DE_VIGENCIA"]:
+                estado_final = "ERROR_DESCUENTO"
+            elif estado_descuento == "CORRECTA" and estado_comercial == "CORRECTA":
                 estado_final = "CORRECTA"
+            elif estado_descuento == "CORRECTA" and estado_comercial == "SIN_REGLA":
+                estado_final = "SIN_REGLA"
+            elif estado_descuento == "CORRECTA" and estado_comercial == "FUERA_DE_VIGENCIA":
+                estado_final = "FUERA_DE_VIGENCIA"
+            elif estado_descuento == "CORRECTA" and estado_comercial in ["ERROR_VALOR_VENTA", "ERROR_DESCUENTO"]:
+                estado_final = estado_comercial
+            elif estado_descuento == "ERROR" and estado_comercial in ["ERROR_VALOR_VENTA", "ERROR_DESCUENTO"]:
+                estado_final = "ERROR_DESCUENTO_" + estado_comercial
+            else:
+                # Fallback: prioridad al estado comercial si es más severo
+                estado_final = estado_comercial if estado_comercial != "SIN_REGLA" else estado_descuento
+            
+            # Construir observación combinada
+            obs_descuento = ""
+            if estado_descuento == "ERROR":
+                obs_descuento = f"Error descuento: {datos['observaciones'][0] if datos['observaciones'] else ''}"
+            elif estado_descuento == "DATOS_INSUFICIENTES":
+                obs_descuento = "Datos insuficientes para validación"
+            
+            obs_comercial = resultado_comercial["observacion"]
+            
+            if obs_descuento and obs_comercial:
+                observacion_final = f"{obs_descuento} | {obs_comercial}"
+            elif obs_descuento:
+                observacion_final = obs_descuento
+            else:
+                observacion_final = obs_comercial
             
             # Calcular % global
             porcentaje_global = (datos["descuento_total"] / datos["subtotal_total"]) * 100 if datos["subtotal_total"] > 0 else 0
@@ -509,8 +647,11 @@ class FacturasView(ctk.CTkToplevel):
                 "subtotal_total": datos["subtotal_total"],
                 "descuento_total": datos["descuento_total"],
                 "porcentaje_global": porcentaje_global,
+                "estado_descuento": estado_descuento,
+                "estado_comercial": estado_comercial,
                 "estado": estado_final,
-                "observacion": "; ".join(datos["observaciones"][:3])  # Primeras 3 observaciones
+                "circular_aplicada": resultado_comercial.get("circular_aplicada"),
+                "observacion": observacion_final
             })
         
         return resultados
@@ -523,9 +664,11 @@ class FacturasView(ctk.CTkToplevel):
         # Calcular estadísticas
         total_facturas = len(self.facturas_resultados)
         correctas = sum(1 for f in self.facturas_resultados if f["estado"] == "CORRECTA")
-        errores = sum(1 for f in self.facturas_resultados if f["estado"] == "ERROR")
+        errores = sum(1 for f in self.facturas_resultados if f["estado"] in ["ERROR", "ERROR_DESCUENTO", "ERROR_VALOR_VENTA", "ERROR_DESCUENTO_ERROR_VALOR_VENTA", "ERROR_DESCUENTO_ERROR_DESCUENTO"])
         revision_manual = sum(1 for f in self.facturas_resultados if f["estado"] == "REVISION_MANUAL")
-        excluidas = 0  # Por ahora
+        excluidas = sum(1 for f in self.facturas_resultados if f["estado"] == "EXCLUIDA_POR_CIRCULAR")
+        sin_regla = sum(1 for f in self.facturas_resultados if f["estado"] == "SIN_REGLA")
+        fuera_vigencia = sum(1 for f in self.facturas_resultados if f["estado"] == "FUERA_DE_VIGENCIA")
         
         # Actualizar tarjetas
         self.total_facturas_var.set(str(total_facturas))
@@ -533,6 +676,8 @@ class FacturasView(ctk.CTkToplevel):
         self.errores_var.set(str(errores))
         self.revision_manual_var.set(str(revision_manual))
         self.excluidas_var.set(str(excluidas))
+        self.sin_regla_var.set(str(sin_regla))
+        self.fuera_vigencia_var.set(str(fuera_vigencia))
     
     def _populate_results_table(self):
         """Pobla la tabla de resultados con las facturas procesadas"""
@@ -558,13 +703,13 @@ class FacturasView(ctk.CTkToplevel):
         header_frame = ctk.CTkFrame(self.table_scroll)
         header_frame.pack(fill="x", padx=5, pady=5)
         
-        headers = ["Secuencia", "Líneas", "Subtotal", "Descuento", "% Global", "Estado", "Observación"]
+        headers = ["Secuencia", "Líneas", "Subtotal", "Descuento", "% Global", "Estado Descuento", "Estado Comercial", "Estado Final", "Circular", "Observación"]
         for i, header in enumerate(headers):
             label = ctk.CTkLabel(
                 header_frame,
                 text=header,
                 font=ctk.CTkFont(size=11, weight="bold"),
-                width=120,
+                width=100 if i < 8 else 120,
                 anchor="w"
             )
             label.grid(row=0, column=i, padx=5, pady=5)
@@ -574,18 +719,44 @@ class FacturasView(ctk.CTkToplevel):
             row_frame = ctk.CTkFrame(self.table_scroll)
             row_frame.pack(fill="x", padx=5, pady=2)
             
-            # Color según estado
+            # Color según estado final
             bg_color = {
                 "CORRECTA": "#C6EFCE",
                 "ERROR": "#FFC7CE",
-                "REVISION_MANUAL": "#FFF2CC"
+                "ERROR_DESCUENTO": "#FFC7CE",
+                "ERROR_VALOR_VENTA": "#FFC7CE",
+                "ERROR_DESCUENTO_ERROR_VALOR_VENTA": "#FFC7CE",
+                "ERROR_DESCUENTO_ERROR_DESCUENTO": "#FFC7CE",
+                "REVISION_MANUAL": "#FFF2CC",
+                "FUERA_DE_VIGENCIA": "#FFE6CC",
+                "EXCLUIDA_POR_CIRCULAR": "#E2E2E2",
+                "REQUIERE_OTRA_CIRCULAR": "#D9E1F2",
+                "SIN_REGLA": "#F2F2F2"
             }.get(factura["estado"], "#FFFFFF")
+            
+            # Colores para estados individuales
+            bg_descuento = {
+                "CORRECTA": "#C6EFCE",
+                "ERROR": "#FFC7CE",
+                "DATOS_INSUFICIENTES": "#FFF2CC"
+            }.get(factura.get("estado_descuento", ""), "#FFFFFF")
+            
+            bg_comercial = {
+                "CORRECTA": "#C6EFCE",
+                "SIN_REGLA": "#F2F2F2",
+                "FUERA_DE_VIGENCIA": "#FFE6CC",
+                "ERROR_VALOR_VENTA": "#FFC7CE",
+                "ERROR_DESCUENTO": "#FFC7CE",
+                "EXCLUIDA_POR_CIRCULAR": "#E2E2E2",
+                "REQUIERE_OTRA_CIRCULAR": "#D9E1F2",
+                "REVISION_MANUAL": "#FFF2CC"
+            }.get(factura.get("estado_comercial", ""), "#FFFFFF")
             
             # Secuencia
             ctk.CTkLabel(
                 row_frame,
                 text=str(factura["secuencia"]),
-                width=120,
+                width=100,
                 anchor="w"
             ).grid(row=0, column=0, padx=5, pady=5)
             
@@ -593,7 +764,7 @@ class FacturasView(ctk.CTkToplevel):
             ctk.CTkLabel(
                 row_frame,
                 text=str(factura["cantidad_lineas"]),
-                width=120,
+                width=100,
                 anchor="w"
             ).grid(row=0, column=1, padx=5, pady=5)
             
@@ -601,7 +772,7 @@ class FacturasView(ctk.CTkToplevel):
             ctk.CTkLabel(
                 row_frame,
                 text=f"${factura['subtotal_total']:,.2f}",
-                width=120,
+                width=100,
                 anchor="w"
             ).grid(row=0, column=2, padx=5, pady=5)
             
@@ -609,7 +780,7 @@ class FacturasView(ctk.CTkToplevel):
             ctk.CTkLabel(
                 row_frame,
                 text=f"${factura['descuento_total']:,.2f}",
-                width=120,
+                width=100,
                 anchor="w"
             ).grid(row=0, column=3, padx=5, pady=5)
             
@@ -617,35 +788,233 @@ class FacturasView(ctk.CTkToplevel):
             ctk.CTkLabel(
                 row_frame,
                 text=f"{factura['porcentaje_global']:.2f}%",
-                width=120,
+                width=100,
                 anchor="w"
             ).grid(row=0, column=4, padx=5, pady=5)
             
-            # Estado
-            estado_label = ctk.CTkLabel(
+            # Estado Descuento
+            estado_descuento_label = ctk.CTkLabel(
+                row_frame,
+                text=factura.get("estado_descuento", ""),
+                width=100,
+                anchor="w",
+                fg_color=bg_descuento,
+                corner_radius=4
+            )
+            estado_descuento_label.grid(row=0, column=5, padx=5, pady=5)
+            
+            # Estado Comercial
+            estado_comercial_label = ctk.CTkLabel(
+                row_frame,
+                text=factura.get("estado_comercial", ""),
+                width=100,
+                anchor="w",
+                fg_color=bg_comercial,
+                corner_radius=4
+            )
+            estado_comercial_label.grid(row=0, column=6, padx=5, pady=5)
+            
+            # Estado Final
+            estado_final_label = ctk.CTkLabel(
                 row_frame,
                 text=factura["estado"],
-                width=120,
+                width=100,
                 anchor="w",
                 fg_color=bg_color,
                 corner_radius=4
             )
-            estado_label.grid(row=0, column=5, padx=5, pady=5)
+            estado_final_label.grid(row=0, column=7, padx=5, pady=5)
             
-            # Observación
+            # Circular aplicada
             ctk.CTkLabel(
                 row_frame,
-                text=factura["observacion"][:50] + "..." if len(factura["observacion"]) > 50 else factura["observacion"],
-                width=300,
+                text=factura.get("circular_aplicada", "-"),
+                width=120,
                 anchor="w"
-            ).grid(row=0, column=6, padx=5, pady=5)
+            ).grid(row=0, column=8, padx=5, pady=5)
+            
+            # Observación
+            obs_text = factura["observacion"]
+            obs_display = obs_text[:40] + "..." if len(obs_text) > 40 else obs_text
+            ctk.CTkLabel(
+                row_frame,
+                text=obs_display,
+                width=200,
+                anchor="w"
+            ).grid(row=0, column=9, padx=5, pady=5)
     
     def _export_results(self):
         """Exporta los resultados a un archivo Excel"""
-        messagebox.showinfo(
-            "En desarrollo",
-            "La función de exportación está en desarrollo."
-        )
+        if not hasattr(self, 'facturas_resultados') or not self.facturas_resultados:
+            messagebox.showwarning("Advertencia", "No hay resultados para exportar")
+            return
+        
+        try:
+            # Solicitar ruta de guardado
+            output_dir = ROOT_DIR / "Resultados"
+            output_dir.mkdir(exist_ok=True)
+            
+            default_filename = f"auditoria_facturas_{date.today().strftime('%Y%m%d_%H%M')}.xlsx"
+            
+            file_path = filedialog.asksaveasfilename(
+                title="Guardar resultados de auditoría",
+                defaultextension=".xlsx",
+                initialdir=str(output_dir),
+                initialfile=default_filename,
+                filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+            )
+            
+            if not file_path:
+                return  # Usuario canceló
+            
+            # Preparar datos para exportación usando self.facturas_resultados
+            export_data = []
+            for factura in self.facturas_resultados:
+                export_data.append({
+                    "Secuencia": factura["secuencia"],
+                    "Lineas": factura["cantidad_lineas"],
+                    "Subtotal": factura["subtotal_total"],
+                    "Descuento": factura["descuento_total"],
+                    "% Global": factura["porcentaje_global"],
+                    "Estado Descuento": factura.get("estado_descuento", ""),
+                    "Estado Comercial": factura.get("estado_comercial", ""),
+                    "Estado Final": factura["estado"],
+                    "Circular": factura.get("circular_aplicada", ""),
+                    "Observacion": factura["observacion"]
+                })
+            
+            # Crear DataFrame y exportar
+            df_export = pd.DataFrame(export_data)
+            df_export.to_excel(file_path, index=False, engine='openpyxl', sheet_name='Resultados')
+            
+            # Aplicar formato visual con openpyxl
+            wb = load_workbook(file_path)
+            ws = wb['Resultados']
+            
+            # Estilo para encabezados
+            header_font = Font(bold=True, size=11)
+            header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+            header_alignment = Alignment(horizontal="center", vertical="center")
+            
+            # Aplicar estilo a encabezados
+            for cell in ws[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+            
+            # Activar autofiltro
+            ws.auto_filter.ref = ws.dimensions
+            
+            # Congelar fila superior
+            ws.freeze_panes = "A2"
+            
+            # Formatear columnas numéricas
+            from openpyxl.styles import numbers
+            
+            # Encontrar columnas por nombre
+            header_row = 1
+            col_indices = {}
+            for col in range(1, ws.max_column + 1):
+                cell_value = ws.cell(row=header_row, column=col).value
+                if cell_value:
+                    col_indices[str(cell_value)] = col
+            
+            # Formatear Subtotal y Descuento (separador de miles, 2 decimales)
+            if "Subtotal" in col_indices:
+                col = col_indices["Subtotal"]
+                for row in range(2, ws.max_row + 1):
+                    ws.cell(row=row, column=col).number_format = '#,##0.00'
+            
+            if "Descuento" in col_indices:
+                col = col_indices["Descuento"]
+                for row in range(2, ws.max_row + 1):
+                    ws.cell(row=row, column=col).number_format = '#,##0.00'
+            
+            # Formatear % Global (2 decimales con símbolo %)
+            if "% Global" in col_indices:
+                col = col_indices["% Global"]
+                for row in range(2, ws.max_row + 1):
+                    ws.cell(row=row, column=col).number_format = '0.00%'
+            
+            # Ajustar ancho automático de columnas
+            for col in ws.columns:
+                max_length = 0
+                column = col[0].column_letter
+                for cell in col:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                ws.column_dimensions[column].width = adjusted_width
+            
+            # Crear hoja de Resumen
+            if self.facturas_resultados:
+                ws_resumen = wb.create_sheet("Resumen")
+                
+                # Calcular estadísticas
+                total_facturas = len(self.facturas_resultados)
+                correctas = sum(1 for f in self.facturas_resultados if f["estado"] == "CORRECTA")
+                errores = sum(1 for f in self.facturas_resultados if f["estado"] in ["ERROR", "ERROR_DESCUENTO", "ERROR_VALOR_VENTA", "ERROR_DESCUENTO_ERROR_VALOR_VENTA", "ERROR_DESCUENTO_ERROR_DESCUENTO"])
+                revision_manual = sum(1 for f in self.facturas_resultados if f["estado"] == "REVISION_MANUAL")
+                sin_regla = sum(1 for f in self.facturas_resultados if f["estado"] == "SIN_REGLA")
+                fuera_vigencia = sum(1 for f in self.facturas_resultados if f["estado"] == "FUERA_DE_VIGENCIA")
+                
+                subtotal_total = sum(f["subtotal_total"] for f in self.facturas_resultados)
+                descuento_total = sum(f["descuento_total"] for f in self.facturas_resultados)
+                
+                # Escribir resumen
+                ws_resumen['A1'] = "RESUMEN DE AUDITORÍA"
+                ws_resumen['A1'].font = Font(bold=True, size=14)
+                ws_resumen.merge_cells('A1:B1')
+                
+                ws_resumen['A3'] = "Métrica"
+                ws_resumen['B3'] = "Valor"
+                ws_resumen['A3'].font = Font(bold=True)
+                ws_resumen['B3'].font = Font(bold=True)
+                
+                resumen_data = [
+                    ("Total Facturas", total_facturas),
+                    ("Correctas", correctas),
+                    ("Errores", errores),
+                    ("Revisión Manual", revision_manual),
+                    ("Sin Regla", sin_regla),
+                    ("Fuera de Vigencia", fuera_vigencia),
+                    ("", ""),
+                    ("Subtotal Total", subtotal_total),
+                    ("Descuento Total", descuento_total),
+                    ("% Global Promedio", (descuento_total / subtotal_total * 100) if subtotal_total > 0 else 0)
+                ]
+                
+                for i, (metrica, valor) in enumerate(resumen_data, start=4):
+                    ws_resumen[f'A{i}'] = metrica
+                    ws_resumen[f'B{i}'] = valor
+                    
+                    # Formatear valores numéricos
+                    if isinstance(valor, (int, float)) and metrica not in ["Total Facturas", "Correctas", "Errores", "Revisión Manual", "Sin Regla", "Fuera de Vigencia"]:
+                        if "%" in metrica:
+                            ws_resumen[f'B{i}'].number_format = '0.00%'
+                        else:
+                            ws_resumen[f'B{i}'].number_format = '#,##0.00'
+                
+                # Ajustar ancho de columnas en resumen
+                ws_resumen.column_dimensions['A'].width = 25
+                ws_resumen.column_dimensions['B'].width = 20
+            
+            # Guardar cambios
+            wb.save(file_path)
+            
+            messagebox.showinfo(
+                "Éxito",
+                f"Resultados exportados correctamente a:\n{file_path}\n\nHoja 'Resultados': detalle de facturas\nHoja 'Resumen': estadísticas generales"
+            )
+            
+        except Exception as e:
+            messagebox.showerror(
+                "Error",
+                f"No se pudo exportar los resultados:\n{str(e)}"
+            )
     
     def _back_to_main(self):
         """Vuelve a la ventana principal"""

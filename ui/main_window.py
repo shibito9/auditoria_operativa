@@ -25,7 +25,7 @@ class MainWindow(ctk.CTk):
         self.minsize(800, 500)
         
         # Configuración de tema
-        ctk.set_appearance_mode("System")
+        ctk.set_appearance_mode("Light")
         ctk.set_default_color_theme("blue")
         
         # Frame principal
@@ -159,11 +159,18 @@ class MainWindow(ctk.CTk):
             )
     
     def _open_config(self):
-        """Abre el módulo de Configuración de Reglas"""
-        messagebox.showinfo(
-            "En desarrollo",
-            "El módulo de Configuración de Reglas está en desarrollo."
-        )
+        """Abre el módulo de Gestión de Circulares"""
+        try:
+            from ui.gestion_circulares_view import GestionCircularesView
+            self.withdraw()  # Ocultar ventana principal
+            self.current_window = GestionCircularesView(self)
+            self.current_window.mainloop()
+            self.deiconify()  # Mostrar ventana principal al cerrar
+        except ImportError as e:
+            messagebox.showerror(
+                "Error",
+                f"No se pudo cargar el módulo de Gestión de Circulares: {e}"
+            )
     
     def _exit_app(self):
         """Cierra la aplicación"""

@@ -1,0 +1,80 @@
+{
+  "circulares": [
+    {
+      "codigo": "684-26",
+      "nombre": "Circular Junio 2026",
+      "fecha_inicio": "2026-06-11",
+      "fecha_fin": "2026-06-30",
+      "descuento_porcentaje": 8.0,
+      "activa": true,
+      "exclusiones": ["lingotes", "plan separe"],
+      "condiciones_especiales": [],
+      "reglas": [
+        {
+          "id": "regla-684-26-001",
+          "categoria": "Joyeria importada",
+          "criterios_procedencia": ["IMPORTADO"],
+          "criterios_categoria": ["Joyeria importada"],
+          "descuento_porcentaje": 8.0,
+          "observaciones": ""
+        },
+        {
+          "id": "regla-684-26-002",
+          "categoria": "Maquila, Esferas y Filigrana",
+          "criterios_procedencia": ["MAQUILA"],
+          "criterios_categoria": ["Maquila", "Esferas", "Filigrana"],
+          "descuento_porcentaje": 8.0,
+          "observaciones": ""
+        },
+        {
+          "id": "regla-684-26-003",
+          "categoria": "Refaccionado",
+          "criterios_procedencia": ["NACIONAL"],
+          "criterios_categoria": ["Refaccionado"],
+          "descuento_porcentaje": 8.0,
+          "observaciones": ""
+        },
+        {
+          "id": "regla-684-26-004",
+          "categoria": "Fabricacion catalogo",
+          "criterios_procedencia": ["NACIONAL"],
+          "criterios_categoria": ["Fabricacion catalogo"],
+          "descuento_porcentaje": 8.0,
+          "observaciones": ""
+        },
+        {
+          "id": "regla-684-26-005",
+          "categoria": "Fabricacion especial (solo oro)",
+          "criterios_categoria": ["Fabricacion especial"],
+          "criterios_descripcion": ["oro"],
+          "descuento_porcentaje": 8.0,
+          "accion_especial": "REVISION_MANUAL",
+          "observaciones": "Costos adicionales de fabricacion especial requieren revision manual si no pueden separarse"
+        },
+        {
+          "id": "regla-684-26-006",
+          "categoria": "Piercing menor a 0.19Gr",
+          "criterios_descripcion": ["piercing"],
+          "criterios_peso": {"max": 0.19},
+          "descuento_porcentaje": 8.0,
+          "observaciones": ""
+        },
+        {
+          "id": "regla-684-26-007",
+          "categoria": "Piercing mayor a 0.20Gr",
+          "criterios_descripcion": ["piercing"],
+          "criterios_peso": {"min": 0.20},
+          "descuento_porcentaje": 8.0,
+          "observaciones": ""
+        },
+        {
+          "id": "regla-684-26-008",
+          "categoria": "Cadenas y Pulsera Calabrote",
+          "criterios_descripcion": ["cadena", "calabrote"],
+          "accion_especial": "REQUIERE_OTRA_CIRCULAR",
+          "observaciones": "Requiere circular específica para cadenas y calabrotes"
+        }
+      ]
+    }
+  ]
+}
