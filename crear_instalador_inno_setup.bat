@@ -1,4 +1,5 @@
 @echo off
+setlocal
 title CREAR INSTALADOR - GAMAN AUDITORIA CAJA FUERTE
 color 0F
 
@@ -40,7 +41,7 @@ if not defined ISCC_EXE (
     echo No encontre ISCC.exe aunque Inno Setup parece estar instalado.
     echo.
     echo Revisa manualmente estas rutas:
-    echo   C:\Program Files (x86)\Inno Setup 6\ISCC.exe
+    echo   C:\Program Files ^(x86^)\Inno Setup 6\ISCC.exe
     echo   C:\Program Files\Inno Setup 6\ISCC.exe
     echo.
     echo Tambien puedes compilar manualmente abriendo:
